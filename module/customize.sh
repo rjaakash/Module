@@ -191,6 +191,6 @@ if [ "$KSU" ]; then
   fi
 fi
 
-rm -rf "$MODPATH/bin" "$MODULE_APK"
+rm -rf "${MODPATH:?}/bin" "$MODULE_APK"
 
 print_msg "* Installation complete"
