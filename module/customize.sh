@@ -70,10 +70,16 @@ if APP_PATH=$(pm_call path "$APP_PACKAGE"); then
   APP_PATH=${APP_PATH##*:}
   INSTALL_PATH=${APP_PATH%/*}
 
-  if [ "${INSTALL_PATH:1:4}" != data ]; then
-    print_msg "* Detected system application"
-    IS_SYSTEM=true
-  elif [ ! -f "$MODULE_APK" ]; then
+  case "$INSTALL_PATH" in
+    /data/*)
+      ;;
+    *)
+      print_msg "* Detected system application"
+      IS_SYSTEM=true
+      ;;
+  esac
+
+  if [ ! -f "$MODULE_APK" ]; then
     print_msg "* Module APK missing"
     VERSION=$(dumpsys package "$APP_PACKAGE" | grep -m1 versionName)
     VERSION=${VERSION#*=}
@@ -133,9 +139,14 @@ install_package() {
         if PATH_CHECK=$(pm_call path "$APP_PACKAGE"); then
           PATH_CHECK=${PATH_CHECK##*:}
           PATH_CHECK=${PATH_CHECK%/*}
-          if [ "${PATH_CHECK:1:4}" != data ]; then
-            IS_SYSTEM=true
-          fi
+
+          case "$PATH_CHECK" in
+            /data/*)
+              ;;
+            *)
+              IS_SYSTEM=true
+              ;;
+          esac
         fi
 
         if [ "$IS_SYSTEM" = true ]; then
