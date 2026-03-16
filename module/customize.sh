@@ -1,182 +1,171 @@
-#!/system/bin/sh
+. "$MODPATH/config"
 
-CFG_FILE="$MODPATH/config"
-[ -f "$CFG_FILE" ] && . "$CFG_FILE"
+ui_print ""
 
-print_msg() {
-  ui_print "$1"
-}
-
-fail_install() {
-  abort "$1"
-}
-
-DEVICE_ARCH="$ARCH"
-TARGET_ARCH="$MODULE_ARCH"
-
-if [ -n "$TARGET_ARCH" ] && [ "$DEVICE_ARCH" != "$TARGET_ARCH" ]; then
-  fail_install "Module architecture does not match device"
+if [ -n "$MODULE_ARCH" ] && [ "$MODULE_ARCH" != "$ARCH" ]; then
+  abort "ERROR: Unsupported architecture
+Device: $ARCH
+Module: $MODULE_ARCH"
 fi
 
-case "$DEVICE_ARCH" in
-  arm) LIB_SUBDIR="armeabi-v7a" ;;
-  arm64) LIB_SUBDIR="arm64-v8a" ;;
-  x86) LIB_SUBDIR="x86" ;;
-  x64) LIB_SUBDIR="x86_64" ;;
-  *) fail_install "Unsupported device architecture" ;;
-esac
+if [ "$ARCH" = "arm" ]; then
+  ABI_DIR=armeabi-v7a
+elif [ "$ARCH" = "arm64" ]; then
+  ABI_DIR=arm64-v8a
+elif [ "$ARCH" = "x86" ]; then
+  ABI_DIR=x86
+elif [ "$ARCH" = "x64" ]; then
+  ABI_DIR=x86_64
+else
+  abort "ERROR: unexpected architecture: ${ARCH}"
+fi
 
-APP_PACKAGE="$PKG_NAME"
-MODULE_APK="$MODPATH/$APP_PACKAGE.apk"
-PATCH_APK="$MODPATH/base.apk"
-MOUNT_ROOT="/data/adb/runtime_overlay"
-RUNTIME_APK="$MOUNT_ROOT/${MODPATH##*/}.apk"
+RUNTIME_APK=/data/adb/rvhc/${MODPATH##*/}.apk
 
-set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
+set_perm_recursive "$MODPATH/bin" 0 0 0755 0777
 
 if su -M -c true >/dev/null 2>/dev/null; then
-  run_root() { su -M -c "$*"; }
+  alias root_exec='su -M -c'
 else
-  run_root() { nsenter -t1 -m sh -c "$*"; }
+  alias root_exec='nsenter -t1 -m'
 fi
 
-run_root grep -F "$APP_PACKAGE" /proc/mounts | while read -r line; do
-  print_msg "* Clearing previous mount binding"
-  mp=${line#* }
-  mp=${mp%% *}
-  run_root umount -l "${mp%%\\*}"
+root_exec grep -F "$PKG_NAME" /proc/mounts | while read -r entry; do
+  ui_print "* Removing existing bind"
+  mnt=${entry#* }
+  mnt=${mnt%% *}
+  root_exec umount -l "${mnt%%\\*}"
 done
 
-am force-stop "$APP_PACKAGE"
+am force-stop "$PKG_NAME"
 
-pm_call() {
-  OUT=$(pm "$@" 2>&1 </dev/null)
-  RET=$?
-  echo "$OUT"
-  return $RET
+pm_run() {
+  RESULT=$(pm "$@" 2>&1 </dev/null)
+  CODE=$?
+  echo "$RESULT"
+  return $CODE
 }
 
-if ! pm_call path "$APP_PACKAGE" >/dev/null 2>&1; then
-  if pm_call install-existing "$APP_PACKAGE" >/dev/null 2>&1; then
-    pm_call uninstall-system-updates "$APP_PACKAGE"
+if ! pm_run path "$PKG_NAME" >&2; then
+  if pm_run install-existing "$PKG_NAME" >&2; then
+    pm_run uninstall-system-updates "$PKG_NAME"
   fi
 fi
 
-IS_SYSTEM=false
-INSTALL_NEEDED=true
-INSTALL_PATH=""
+IS_SYSTEM_APP=false
+NEED_INSTALL=true
 
-if APP_PATH=$(pm_call path "$APP_PACKAGE"); then
-  APP_PATH=${APP_PATH##*:}
-  INSTALL_PATH=${APP_PATH%/*}
+if BASE_PATH=$(pm_run path "$PKG_NAME"); then
+  echo >&2 "'$BASE_PATH'"
+  BASE_PATH=${BASE_PATH##*:}
+  BASE_PATH=${BASE_PATH%/*}
 
-  case "$INSTALL_PATH" in
-    /data/*)
-      ;;
-    *)
-      print_msg "* Detected system application"
-      IS_SYSTEM=true
-      ;;
-  esac
+  if [ "${BASE_PATH:1:4}" != data ]; then
+    ui_print "* Detected system package"
+    IS_SYSTEM_APP=true
+  elif [ ! -f "$MODPATH/$PKG_NAME.apk" ]; then
+    ui_print "* Missing stock package inside module"
 
-  if [ ! -f "$MODULE_APK" ]; then
-    print_msg "* Module APK missing"
-    VERSION=$(dumpsys package "$APP_PACKAGE" | grep -m1 versionName)
-    VERSION=${VERSION#*=}
-    if [ "$VERSION" = "$PKG_VER" ] || [ -z "$VERSION" ]; then
-      print_msg "* Installed version already matches"
-      INSTALL_NEEDED=false
+    CURRENT_VER=$(dumpsys package "$PKG_NAME" 2>&1 | grep -m1 versionName)
+    CURRENT_VER=${CURRENT_VER#*=}
+
+    if [ "$CURRENT_VER" = "$PKG_VER" ] || [ -z "$CURRENT_VER" ]; then
+      ui_print "* Skipping installation step"
+      NEED_INSTALL=false
     else
-      fail_install "Installed package version differs from module"
+      abort "ERROR: version mismatch
+installed: $CURRENT_VER
+module:    $PKG_VER"
     fi
-  elif [ -f "$INSTALL_PATH/base.apk" ] && cmp -s "$INSTALL_PATH/base.apk" "$MODULE_APK"; then
-    print_msg "* Installed package already identical to module"
-    INSTALL_NEEDED=false
+  elif "${MODPATH:?}/bin/$ARCH/cmpr" "$BASE_PATH/base.apk" "$MODPATH/$PKG_NAME.apk"; then
+    ui_print "* Package already matches module"
+    NEED_INSTALL=false
   fi
 fi
 
-install_package() {
+perform_install() {
 
-  [ -f "$MODULE_APK" ] || fail_install "Required module package missing"
+  if [ ! -f "$MODPATH/$PKG_NAME.apk" ]; then
+    abort "ERROR: required APK not present"
+  fi
 
-  print_msg "* Starting package installation"
+  ui_print "* Installing $PKG_NAME version $PKG_VER"
 
-  VERIFY_A=$(settings get global verifier_verify_adb_installs)
-  VERIFY_B=$(settings get global package_verifier_enable)
+  INSTALL_ERROR=""
+
+  OLD_V1=$(settings get global verifier_verify_adb_installs)
+  OLD_V2=$(settings get global package_verifier_enable)
 
   settings put global verifier_verify_adb_installs 0
   settings put global package_verifier_enable 0
 
-  SIZE=$(stat -c "%s" "$MODULE_APK")
+  FILE_SIZE=$(stat -c "%s" "$MODPATH/$PKG_NAME.apk")
 
   for TRY in 1 2; do
 
-    if ! SESSION=$(pm_call install-create --user 0 -r -d -S "$SIZE"); then
-      INSTALL_ERR="$SESSION"
+    if ! SESSION=$(pm_run install-create --user 0 -i com.android.vending -r -d -S "$FILE_SIZE"); then
+      ui_print "ERROR: failed creating install session"
+      INSTALL_ERROR="$SESSION"
       break
     fi
 
     SESSION=${SESSION#*[}
     SESSION=${SESSION%]*}
 
-    set_perm "$MODULE_APK" 1000 1000 0644 u:object_r:apk_data_file:s0
+    set_perm "$MODPATH/$PKG_NAME.apk" 1000 1000 644 u:object_r:apk_data_file:s0
 
-    if ! WRITE=$(pm_call install-write -S "$SIZE" "$SESSION" "$APP_PACKAGE.apk" "$MODULE_APK"); then
-      INSTALL_ERR="$WRITE"
+    if ! OUT=$(pm_run install-write -S "$FILE_SIZE" "$SESSION" "$PKG_NAME.apk" "$MODPATH/$PKG_NAME.apk"); then
+      ui_print "ERROR: write stage failed"
+      INSTALL_ERROR="$OUT"
       break
     fi
 
-    if ! RESULT=$(pm_call install-commit "$SESSION"); then
+    if ! OUT=$(pm_run install-commit "$SESSION"); then
 
-      echo "$RESULT"
+      ui_print "$OUT"
 
-      if echo "$RESULT" | grep -q -e INSTALL_FAILED_VERSION_DOWNGRADE -e INSTALL_FAILED_UPDATE_INCOMPATIBLE; then
+      if echo "$OUT" | grep -q -e INSTALL_FAILED_VERSION_DOWNGRADE -e INSTALL_FAILED_UPDATE_INCOMPATIBLE; then
 
-        print_msg "* Resolving installation conflict"
+        ui_print "* Attempting recovery"
+        pm_run uninstall-system-updates "$PKG_NAME"
 
-        pm_call uninstall-system-updates "$APP_PACKAGE"
-
-        if PATH_CHECK=$(pm_call path "$APP_PACKAGE"); then
-          PATH_CHECK=${PATH_CHECK##*:}
-          PATH_CHECK=${PATH_CHECK%/*}
-
-          case "$PATH_CHECK" in
-            /data/*)
-              ;;
-            *)
-              IS_SYSTEM=true
-              ;;
-          esac
+        if BASE_PATH=$(pm_run path "$PKG_NAME"); then
+          BASE_PATH=${BASE_PATH##*:}
+          BASE_PATH=${BASE_PATH%/*}
+          if [ "${BASE_PATH:1:4}" != data ]; then
+            IS_SYSTEM_APP=true
+          fi
         fi
 
-        if [ "$IS_SYSTEM" = true ]; then
+        if [ "$IS_SYSTEM_APP" = true ]; then
 
-          SCRIPT="/data/adb/post-fs-data.d/${APP_PACKAGE}-cleanup.sh"
+          CLEAN_SCRIPT="/data/adb/post-fs-data.d/$PKG_NAME-uninstall.sh"
 
-          if [ -f "$SCRIPT" ]; then
-            print_msg "* Existing cleanup script detected"
-            INSTALL_ERR=" "
+          if [ -f "$CLEAN_SCRIPT" ]; then
+            ui_print "* Existing cleanup detected. Reboot then flash again."
+            ui_print ""
+            INSTALL_ERROR=" "
             break
           fi
 
-          mkdir -p /data/adb/runtime_overlay/empty /data/adb/post-fs-data.d
-          echo "mount -o bind /data/adb/runtime_overlay/empty $PATH_CHECK" > "$SCRIPT"
-          chmod +x "$SCRIPT"
+          mkdir -p /data/adb/rvhc/empty /data/adb/post-fs-data.d
+          echo "mount -o bind /data/adb/rvhc/empty $BASE_PATH" > "$CLEAN_SCRIPT"
+          chmod +x "$CLEAN_SCRIPT"
 
-          print_msg "* Temporary cleanup script created"
-          print_msg "* Reboot device and reinstall module"
-
-          INSTALL_ERR=" "
+          ui_print "* Cleanup script created"
+          ui_print ""
+          ui_print "* Reboot and flash the module again"
+          INSTALL_ERROR=" "
           break
 
         else
 
-          print_msg "* Removing existing user installation"
+          ui_print "* Removing previous installation"
 
-          if ! OUT=$(pm_call uninstall -k --user 0 "$APP_PACKAGE"); then
-            echo "$OUT"
+          if ! OUT=$(pm_run uninstall -k --user 0 "$PKG_NAME"); then
+            ui_print "$OUT"
             if [ $TRY = 2 ]; then
-              INSTALL_ERR="Package removal failed"
+              INSTALL_ERROR="ERROR: uninstall failed"
               break
             fi
           fi
@@ -185,91 +174,100 @@ install_package() {
         fi
       fi
 
-      INSTALL_ERR="$RESULT"
+      ui_print "ERROR: commit stage failed"
+      INSTALL_ERROR="$OUT"
       break
     fi
 
-    if PATH_OK=$(pm_call path "$APP_PACKAGE"); then
-      PATH_OK=${PATH_OK##*:}
-      INSTALL_PATH=${PATH_OK%/*}
+    if BASE_PATH=$(pm_run path "$PKG_NAME"); then
+      BASE_PATH=${BASE_PATH##*:}
+      BASE_PATH=${BASE_PATH%/*}
     else
-      INSTALL_ERR=" "
+      INSTALL_ERROR=" "
       break
     fi
 
     break
   done
 
-  settings put global verifier_verify_adb_installs "$VERIFY_A"
-  settings put global package_verifier_enable "$VERIFY_B"
+  settings put global verifier_verify_adb_installs "$OLD_V1"
+  settings put global package_verifier_enable "$OLD_V2"
 
-  if [ "$INSTALL_ERR" ]; then
-    echo "$INSTALL_ERR"
-    fail_install "Disable module, reboot device, install app manually, then flash module again"
+  if [ "$INSTALL_ERROR" ]; then
+    ui_print "$INSTALL_ERROR"
+    abort "ERROR: disable module, reboot device, install app manually, then flash module again"
   fi
 }
 
-if [ "$INSTALL_NEEDED" = true ]; then
-  install_package
+if [ $NEED_INSTALL = true ] && ! perform_install; then
+  abort
 fi
 
-LIB_DIR="$INSTALL_PATH/lib/$DEVICE_ARCH"
+LIB_PATH=${BASE_PATH}/lib/${ARCH}
 
-if [ "$INSTALL_NEEDED" = true ] || [ -z "$(ls -A "$LIB_DIR" 2>/dev/null)" ]; then
+if [ $NEED_INSTALL = true ] || [ -z "$(ls -A1 "$LIB_PATH")" ]; then
 
-  print_msg "* Extracting native library files"
+  ui_print "* Extracting native libraries"
 
-  if [ ! -d "$LIB_DIR" ]; then
-    mkdir -p "$LIB_DIR"
+  if [ ! -d "$LIB_PATH" ]; then
+    mkdir -p "$LIB_PATH"
   else
-    rm -f "$LIB_DIR"/* >/dev/null 2>&1
+    rm -f "$LIB_PATH"/* >/dev/null 2>&1 || :
   fi
 
-  unzip -o -j "$MODULE_APK" "lib/${LIB_SUBDIR}/*" -d "$LIB_DIR" >/dev/null 2>&1 \
-    || fail_install "Native library extraction failed"
+  if ! OUT=$(unzip -o -j "$MODPATH/$PKG_NAME.apk" "lib/${ABI_DIR}/*" -d "$LIB_PATH" 2>&1); then
+    ui_print "ERROR: native library extraction failed"
+    abort "$OUT"
+  fi
 
-  set_perm_recursive "$INSTALL_PATH/lib" 1000 1000 0755 0755 u:object_r:apk_data_file:s0
+  set_perm_recursive "${BASE_PATH}/lib" 1000 1000 755 755 u:object_r:apk_data_file:s0
 fi
 
-print_msg "* Applying module file permissions"
+ui_print "* Applying permissions"
+set_perm "$MODPATH/base.apk" 1000 1000 644 u:object_r:apk_data_file:s0
 
-set_perm "$PATCH_APK" 1000 1000 0644 u:object_r:apk_data_file:s0
+ui_print "* Mounting patched APK"
 
-mkdir -p "$MOUNT_ROOT"
+mkdir -p /data/adb/rvhc
+RUNTIME_APK=/data/adb/rvhc/${MODPATH##*/}.apk
+mv -f "$MODPATH/base.apk" "$RUNTIME_APK"
 
-mv -f "$PATCH_APK" "$RUNTIME_APK"
-
-print_msg "* Activating overlay mount"
-
-if ! run_root mount -o bind "$RUNTIME_APK" "$INSTALL_PATH/base.apk"; then
-  print_msg "Bind mount operation failed"
+if ! OUT=$(root_exec mount -o bind "$RUNTIME_APK" "$BASE_PATH/base.apk" 2>&1); then
+  ui_print "ERROR: bind mount failed"
+  ui_print "$OUT"
 fi
 
-am force-stop "$APP_PACKAGE"
+am force-stop "$PKG_NAME"
 
-print_msg "* Running package optimization"
+ui_print "* Running package optimization"
 
-cmd package compile -m speed-profile -f "$APP_PACKAGE"
+cmd package compile -m speed-profile -f "$PKG_NAME"
 
 if [ "$KSU" ]; then
 
-  UID=$(dumpsys package "$APP_PACKAGE" | grep -m1 uid)
+  UID=$(dumpsys package "$PKG_NAME" 2>&1 | grep -m1 uid)
   UID=${UID#*=}
   UID=${UID%% *}
 
   if [ -z "$UID" ]; then
-    UID=$(dumpsys package "$APP_PACKAGE" | grep -m1 userId)
+    UID=$(dumpsys package "$PKG_NAME" 2>&1 | grep -m1 userId)
     UID=${UID#*=}
     UID=${UID%% *}
   fi
 
-  if [ -n "$UID" ]; then
-    "$MODPATH/bin/$DEVICE_ARCH/ksu_profile" "$UID" "$APP_PACKAGE" >/dev/null 2>&1
+  if [ "$UID" ]; then
+    if ! OUT=$("${MODPATH:?}/bin/$ARCH/ksu_profile" "$UID" "$PKG_NAME" 2>&1); then
+      ui_print "  $OUT"
+      ui_print "* KernelSU fork detected"
+      ui_print "  disable 'Unmount modules' for $PKG_NAME"
+    fi
   else
-    print_msg "Unable to resolve package UID"
+    ui_print "ERROR: unable to determine UID for $PKG_NAME"
+    dumpsys package "$PKG_NAME" >&2
   fi
 fi
 
-rm -rf "${MODPATH:?}/bin" "$MODULE_APK"
+rm -rf "${MODPATH:?}/bin" "$MODPATH/$PKG_NAME.apk"
 
-print_msg "* Module installation process finished"
+ui_print "* Finished"
+ui_print " "
