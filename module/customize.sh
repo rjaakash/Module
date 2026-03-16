@@ -78,7 +78,7 @@ if APP_BASE=$(run_pm path "$PKG_NAME"); then
 installed: $INSTALLED_VER
 module:    $PKG_VER"
     fi
-  elif "${MODPATH:?}/bin/$ARCH/cmpr" "$APP_BASE/base.apk" "$MODPATH/$PKG_NAME.apk"; then
+  elif cmp -s "$APP_BASE/base.apk" "$MODPATH/$PKG_NAME.apk"; then
     ui_print "* Package already matches module"
     INSTALL_REQUIRED=false
   fi
