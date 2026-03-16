@@ -1,6 +1,5 @@
 #!/system/bin/sh
 
-# ---- Load configuration ----
 CFG_FILE="$MODPATH/config"
 [ -f "$CFG_FILE" ] && . "$CFG_FILE"
 
@@ -12,7 +11,6 @@ fail_install() {
   abort "$1"
 }
 
-# ---- Validate architecture ----
 DEVICE_ARCH="$ARCH"
 TARGET_ARCH="$MODULE_ARCH"
 
@@ -28,7 +26,6 @@ case "$DEVICE_ARCH" in
   *) fail_install "Unsupported CPU architecture: $DEVICE_ARCH" ;;
 esac
 
-# ---- Prepare environment ----
 APP_PACKAGE="$PKG_NAME"
 MODULE_APK="$MODPATH/$APP_PACKAGE.apk"
 PATCH_APK="$MODPATH/base.apk"
@@ -37,14 +34,12 @@ RUNTIME_APK="$MOUNT_DIR/${MODPATH##*/}.apk"
 
 set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 
-# Determine mount executor
 if su -M -c true >/dev/null 2>&1; then
   run_mount() { su -M -c "$*"; }
 else
   run_mount() { nsenter -t1 -m sh -c "$*"; }
 fi
 
-# ---- Remove previous mounts ----
 run_mount grep -F "$APP_PACKAGE" /proc/mounts | while read -r entry; do
   print_msg "* Removing previous mount"
   target=${entry#* }
@@ -52,10 +47,8 @@ run_mount grep -F "$APP_PACKAGE" /proc/mounts | while read -r entry; do
   run_mount umount -l "${target%%\\*}"
 done
 
-# ---- Stop running app ----
 am force-stop "$APP_PACKAGE"
 
-# ---- Package manager helper ----
 pm_call() {
   out=$(pm "$@" 2>&1 </dev/null)
   rc=$?
@@ -63,14 +56,12 @@ pm_call() {
   return $rc
 }
 
-# ---- Ensure package exists ----
 if ! pm_call path "$APP_PACKAGE" >/dev/null 2>&1; then
   if pm_call install-existing "$APP_PACKAGE" >/dev/null 2>&1; then
     pm_call uninstall-system-updates "$APP_PACKAGE"
   fi
 fi
 
-# ---- Determine install path ----
 INSTALL_PATH=""
 SYSTEM_APP=false
 INSTALL_REQUIRED=true
@@ -98,7 +89,6 @@ if APP_PATH=$(pm_call path "$APP_PACKAGE"); then
   fi
 fi
 
-# ---- Install or update APK ----
 install_apk() {
 
   [ -f "$MODULE_APK" ] || fail_install "Required APK not found"
@@ -152,7 +142,6 @@ if [ "$INSTALL_REQUIRED" = true ]; then
   install_apk
 fi
 
-# ---- Native library extraction ----
 LIB_DIR="$INSTALL_PATH/lib/$DEVICE_ARCH"
 
 if [ "$INSTALL_REQUIRED" = true ] || [ -z "$(ls -A "$LIB_DIR" 2>/dev/null)" ]; then
@@ -167,14 +156,12 @@ if [ "$INSTALL_REQUIRED" = true ] || [ -z "$(ls -A "$LIB_DIR" 2>/dev/null)" ]; t
   set_perm_recursive "$INSTALL_PATH/lib" 1000 1000 0755 0755 u:object_r:apk_data_file:s0
 fi
 
-# ---- Prepare patched APK ----
 print_msg "* Preparing runtime mount"
 set_perm "$PATCH_APK" 1000 1000 0644 u:object_r:apk_data_file:s0
 
 mkdir -p "$MOUNT_DIR"
 mv -f "$PATCH_APK" "$RUNTIME_APK"
 
-# ---- Bind mount patched APK ----
 print_msg "* Mounting patched APK"
 
 if ! run_mount mount -o bind "$RUNTIME_APK" "$INSTALL_PATH/base.apk"; then
@@ -183,11 +170,9 @@ fi
 
 am force-stop "$APP_PACKAGE"
 
-# ---- Optimize package ----
 print_msg "* Optimizing application"
 cmd package compile -m speed-profile -f "$APP_PACKAGE"
 
-# ---- KernelSU compatibility ----
 if [ "$KSU" ]; then
   UID_LINE=$(dumpsys package "$APP_PACKAGE" | grep -m1 uid)
   APP_UID=${UID_LINE#*=}
@@ -206,7 +191,6 @@ if [ "$KSU" ]; then
   fi
 fi
 
-# ---- Cleanup ----
 rm -rf "$MODPATH/bin" "$MODULE_APK"
 
 print_msg "* Installation complete"
