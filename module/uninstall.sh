@@ -4,11 +4,14 @@
 	until [ "$(getprop sys.boot_completed)" = 1 ]; do sleep 1; done
 	until [ -d "/sdcard/Android" ]; do sleep 1; done
 
-	DIR=${0%/*}
-	. "$DIR/config"
+	MODDIR=${0%/*}
+	. "$MODDIR/config"
 
-	rm "/data/adb/rvhc/${DIR##*/}.apk"
-	rmdir "/data/adb/rvhc"
+	APK_CACHE_DIR=/data/adb/apk_cache
+	APK_BIND_PATH=$APK_CACHE_DIR/${MODDIR##*/}.apk
+
+	rm "$APK_BIND_PATH"
+	rmdir "$APK_CACHE_DIR"
 	rm "/data/adb/post-fs-data.d/$PKG_NAME-uninstall.sh"
 
 } &
