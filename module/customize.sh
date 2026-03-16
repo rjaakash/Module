@@ -9,18 +9,19 @@ Module: $MODULE_ARCH"
 fi
 
 if [ "$ARCH" = "arm" ]; then
-  ABI_NAME=armeabi-v7a
+  ABI_DIR=armeabi-v7a
 elif [ "$ARCH" = "arm64" ]; then
-  ABI_NAME=arm64-v8a
+  ABI_DIR=arm64-v8a
 elif [ "$ARCH" = "x86" ]; then
-  ABI_NAME=x86
+  ABI_DIR=x86
 elif [ "$ARCH" = "x64" ]; then
-  ABI_NAME=x86_64
+  ABI_DIR=x86_64
 else
   abort "ERROR: unexpected architecture: ${ARCH}"
 fi
 
-APK_RUNTIME=/data/adb/apk_cache/${MODPATH##*/}.apk
+APK_CACHE_DIR=/data/adb/apk_cache
+APK_BIND_PATH=$APK_CACHE_DIR/${MODPATH##*/}.apk
 
 set_perm_recursive "$MODPATH/bin" 0 0 0755 0777
 
@@ -148,8 +149,8 @@ install_package() {
             break
           fi
 
-          mkdir -p /data/adb/apk_cache/empty /data/adb/post-fs-data.d
-          echo "mount -o bind /data/adb/apk_cache/empty $APP_BASE" > "$CLEAN_SCRIPT"
+          mkdir -p "$APK_CACHE_DIR/empty" /data/adb/post-fs-data.d
+          echo "mount -o bind $APK_CACHE_DIR/empty $APP_BASE" > "$CLEAN_SCRIPT"
           chmod +x "$CLEAN_SCRIPT"
 
           ui_print "* Cleanup script created"
@@ -195,7 +196,7 @@ install_package() {
 
   if [ "$install_error" ]; then
     ui_print "$install_error"
-    abort "ERROR: disable module, reboot device, install app manually, then flash module again"
+    abort "ERROR: disable module, reboot device, install app manually and flash module again"
   fi
 }
 
@@ -215,7 +216,7 @@ if [ $INSTALL_REQUIRED = true ] || [ -z "$(ls -A1 "$LIB_DIR")" ]; then
     rm -f "$LIB_DIR"/* >/dev/null 2>&1 || :
   fi
 
-  if ! cmd_output=$(unzip -o -j "$MODPATH/$PKG_NAME.apk" "lib/${ABI_NAME}/*" -d "$LIB_DIR" 2>&1); then
+  if ! cmd_output=$(unzip -o -j "$MODPATH/$PKG_NAME.apk" "lib/${ABI_DIR}/*" -d "$LIB_DIR" 2>&1); then
     ui_print "ERROR: native library extraction failed"
     abort "$cmd_output"
   fi
@@ -228,11 +229,11 @@ set_perm "$MODPATH/base.apk" 1000 1000 644 u:object_r:apk_data_file:s0
 
 ui_print "* Mounting patched APK"
 
-mkdir -p /data/adb/apk_cache
-APK_RUNTIME=/data/adb/apk_cache/${MODPATH##*/}.apk
-mv -f "$MODPATH/base.apk" "$APK_RUNTIME"
+mkdir -p "$APK_CACHE_DIR"
+APK_BIND_PATH="$APK_CACHE_DIR/${MODPATH##*/}.apk"
+mv -f "$MODPATH/base.apk" "$APK_BIND_PATH"
 
-if ! cmd_output=$(run_root mount -o bind "$APK_RUNTIME" "$APP_BASE/base.apk" 2>&1); then
+if ! cmd_output=$(run_root mount -o bind "$APK_BIND_PATH" "$APP_BASE/base.apk" 2>&1); then
   ui_print "ERROR: bind mount failed"
   ui_print "$cmd_output"
 fi
